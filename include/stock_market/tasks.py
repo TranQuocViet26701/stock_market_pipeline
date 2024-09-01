@@ -4,6 +4,9 @@ from io import BytesIO
 from minio import Minio
 import requests
 from airflow.hooks.base import BaseHook
+from airflow.exceptions import AirflowNotFoundException
+
+BUCKET_NAME = "stock-market"
 
 
 def _get_stock_prices(url: str, symbol: str) -> str:
@@ -16,29 +19,50 @@ def _get_stock_prices(url: str, symbol: str) -> str:
     return json.dumps(resp.json()["chart"]["result"][0])
 
 
-def _store_prices(stock: str):
-    minio = BaseHook.get_connection("minio")
-    client = Minio(
-        minio.extra_dejson["endpoint"].split("//")[1],
-        access_key=minio.login,
-        secret_key=minio.password,
-        secure=False,
-    )
-
-    bucket_name = "stock-market"
-    found = client.bucket_exists(bucket_name)
+def _store_prices(stock: str) -> str:
+    client = _get_minio_connection()
+    found = client.bucket_exists(BUCKET_NAME)
     if not found:
-        client.make_bucket(bucket_name)
-        print("Created bucket ", bucket_name)
+        client.make_bucket(BUCKET_NAME)
+        print("Created bucket ", BUCKET_NAME)
     else:
-        print("Bucket ", bucket_name, " already exists")
+        print("Bucket ", BUCKET_NAME, " already exists")
 
     stock = json.loads(stock)
     symbol = stock["meta"]["symbol"]
     data = json.dumps(stock, ensure_ascii=False).encode("utf-8")
     client.put_object(
-        bucket_name=bucket_name,
+        bucket_name=BUCKET_NAME,
         object_name=f"{symbol}/prices.json",
         data=BytesIO(data),
         length=len(data),
     )
+
+    return f"{BUCKET_NAME}/{symbol}"
+
+
+def _get_minio_connection():
+    minio = BaseHook.get_connection("minio")
+    client = Minio(
+        minio.extra_dejson["endpoint_url"].split("//")[1],
+        access_key=minio.login,
+        secret_key=minio.password,
+        secure=False,
+    )
+
+    return client
+
+
+def _get_formatted_csv(path: str):
+    client = _get_minio_connection()
+
+    objects = client.list_objects(
+        bucket_name=BUCKET_NAME,
+        prefix=f"{path.split('/')[1]}/formatted_prices/",
+        recursive=True,
+    )
+
+    for obj in objects:
+        if obj.object_name.endswith(".csv"):
+            return obj.object_name
+    return AirflowNotFoundException("The CSV file does not exist")
